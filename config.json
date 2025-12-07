@@ -1,0 +1,17 @@
+{
+  "wishlists": [
+    {
+      "platform": "amazon",
+      "name": "Morgan Deals",
+      "identifier": "https://www.amazon.com/hz/wishlist/ls/ABC123",
+      "poll_minutes": 10
+    },
+    {
+      "platform": "throne",
+      "name": "Rin Throne",
+      "identifier": "rinusername",
+      "poll_minutes": 180,
+      "recipients": ["you@example.com", "rin@example.com"]
+    }
+  ]
+}

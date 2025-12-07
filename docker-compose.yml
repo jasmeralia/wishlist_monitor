@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  wishlist-monitor:
+    build: .
+    container_name: wishlist-monitor
+    restart: unless-stopped
+    environment:
+      # Email/global recipients
+      EMAIL_FROM: "wishlist-bot@example.com"
+      EMAIL_TO: "you@example.com"   # comma/semicolon separated, can be empty
+      SMTP_HOST: "smtp.gmail.com"
+      SMTP_PORT: "587"
+      SMTP_USER: "wishlist-bot@example.com"
+      SMTP_PASS: "your-smtp-password"
+      SMTP_USE_SSL: "false"
+
+      # General settings
+      POLL_MINUTES: "30"
+      MODE: "daemon"
+      LOG_LEVEL: "INFO"
+
+      # DB & log paths inside container
+      DB_PATH: "/data/wishlist_state.sqlite3"
+      LOG_FILE: "/data/wishlist_monitor.log"
+      CONFIG_PATH: "/data/config.json"
+
+    volumes:
+      # Persist DB, logs, and config.json
+      - ./data:/data
+      # If you want to keep config.json in repo instead of inside ./data,
+      # you can also mount it explicitly:
+      # - ./config.json:/data/config.json:ro

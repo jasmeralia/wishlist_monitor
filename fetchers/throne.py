@@ -5,7 +5,7 @@ import hashlib
 from typing import List, Optional
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 import json
 from tenacity import retry, wait_exponential_jitter, stop_after_attempt, RetryError
 
@@ -285,11 +285,19 @@ def _extract_items_grid(html: str) -> Optional[List[Item]]:
                     price_cents = -1
                 found_price = True
                 break
-            container = container.parent
+            parent = container.parent
+            if isinstance(parent, Tag):
+                container = parent
+            else:
+                break
         if not found_price:
             continue
 
-        href = a["href"]
+        href_raw = a.get("href")
+        if not isinstance(href_raw, str):
+            continue
+        
+        href = href_raw
         if href.startswith("/"):
             href = "https://throne.com" + href
         key = href or txt
@@ -301,7 +309,7 @@ def _extract_items_grid(html: str) -> Optional[List[Item]]:
                 name=txt,
                 price_cents=price_cents,
                 currency=currency,
-                product_url=href or "",
+                product_url=href,
                 image_url="",
                 available=True,
             )

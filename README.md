@@ -97,6 +97,7 @@ wishlist_monitor/
     throne.py
   config.json
   requirements.txt
+  requirements-dev.txt
   Dockerfile
   docker-compose.yml
   README.md
@@ -233,6 +234,38 @@ This will:
 2. Run through each configured wishlist once.
 3. Send any necessary email notifications.
 4. Exit.
+
+---
+
+## Development
+
+### Installing development dependencies
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+This installs:
+- `mypy` for static type checking
+- `ruff` for linting and code formatting
+
+### Running type checks
+
+```bash
+mypy .
+```
+
+### Running linter
+
+```bash
+ruff check .
+```
+
+To automatically fix issues:
+
+```bash
+ruff check --fix .
+```
 
 ---
 

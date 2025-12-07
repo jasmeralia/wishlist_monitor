@@ -4,3 +4,5 @@ pytz
 tenacity
 types-pytz
 types-requests
+ruff
+mypy

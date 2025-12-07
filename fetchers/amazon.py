@@ -208,20 +208,25 @@ def fetch_items(identifier: str, wishlist_name: str | None = None) -> Optional[L
             page_count = 0
             for li in li_items:
                 link = li.select_one("a[href^='/dp']")
-                href = link["href"].split("?")[0] if link else None
-                if href and not href.startswith("http"):
+                if not link:
+                    continue
+                
+                href_raw = link.get("href")
+                if not isinstance(href_raw, str):
+                    continue
+                href = href_raw.split("?")[0]
+                if not href.startswith("http"):
                     href = "https://www.amazon.com" + href
+                
                 title_el = li.select_one(".awl-item-title")
-                name = (
-                    title_el.get_text(strip=True) if title_el else None
-                )
-                price_str = li.get("data-price")
-                if not price_str:
-                    price_span = li.select_one(
-                        "span.a-offscreen"
-                    )
-                    if price_span:
-                        price_str = price_span.get_text(strip=True)
+                name = title_el.get_text(strip=True) if title_el else None
+                
+                price_elem = li.select_one("span.a-price-whole")
+                price_raw = price_elem.get_text(strip=True) if price_elem else None
+                if isinstance(price_raw, str):
+                    price_cents = _format_price_to_cents(price_raw)
+                else:
+                    price_cents = -1
 
                 key = href or name or ""
                 if not key:
@@ -231,14 +236,13 @@ def fetch_items(identifier: str, wishlist_name: str | None = None) -> Optional[L
                     continue
                 seen_keys.add(key)
 
-                price_cents = _format_price_to_cents(price_str)
                 items.append(
                     Item(
                         item_id=key,
                         name=name or "(no name)",
                         price_cents=price_cents,
                         currency="USD",
-                        product_url=href or "",
+                        product_url=href,
                         image_url="",
                         available=True,
                     )
@@ -255,8 +259,9 @@ def fetch_items(identifier: str, wishlist_name: str | None = None) -> Optional[L
             token_input = soup.select_one(
                 "form.scroll-state input.showMoreUrl"
             )
-            if token_input and token_input.get("value"):
-                next_url = "https://www.amazon.com" + token_input["value"]
+            token_value = token_input.get("value") if token_input else None
+            if isinstance(token_value, str) and token_value:
+                next_url = "https://www.amazon.com" + token_value
                 page += 1
                 sd = random.uniform(
                     PAGE_SLEEP * 0.5, PAGE_SLEEP * 1.5

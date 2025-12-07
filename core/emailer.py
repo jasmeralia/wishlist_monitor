@@ -60,9 +60,9 @@ def send_email(
     msg.attach(part_html)
 
     if SMTP_USE_SSL:
-        server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30)
+        server: smtplib.SMTP_SSL | smtplib.SMTP = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT)
     else:
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT)
 
     try:
         if not SMTP_USE_SSL:

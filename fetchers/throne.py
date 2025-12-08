@@ -1,5 +1,7 @@
 # fetchers/throne.py
 import os
+import datetime
+import logging
 import re
 import hashlib
 from typing import List, Optional
@@ -13,6 +15,23 @@ from core.models import Item
 from core.logger import get_logger
 
 logger = get_logger(__name__)
+
+# DEBUG HTML dumping (only when log level = DEBUG)
+def _dump_html_debug(wishlist_name: str | None, html: str) -> None:
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    try:
+        os.makedirs("/data/debug_dumps", exist_ok=True)
+        ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", wishlist_name or "unknown")
+        path = f"/data/debug_dumps/throne_{safe}_{ts}.html"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html)
+        logger.debug("Throne HTML dumped to %s", path)
+    except Exception as exc:
+        logger.debug("Failed to dump Throne HTML: %s", exc)
+
+
 
 USER_AGENT = os.getenv(
     "THRONE_USER_AGENT",
@@ -334,6 +353,7 @@ def fetch_items(identifier: str, wishlist_name: str | None = None) -> Optional[L
 
     try:
         html = _fetch(url)
+        _dump_html_debug(wishlist_name, html)
     except RetryError as e:
         logger.error("Throne fetch failed for %s after retries: %s", url, e)
         return None

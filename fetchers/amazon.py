@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import time
+import json
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse, urlunparse, urlencode
 
@@ -157,33 +158,45 @@ def extract_items(html: str) -> list[Item]:
 
 
 def _extract_pagination_tokens(html: str) -> tuple[str | None, str | None]:
-    """Extract lastEvaluatedKey and itemsRenderedSoFar from the page, if present."""
+    """Extract pagination token from Amazon mobile wishlist a-state JSON.
+
+    We look for <script type="a-state"> blocks whose JSON contains
+    a "showMoreUrl" field. That URL already encodes pagination state.
+    """
     soup = BeautifulSoup(html, "html.parser")
-    lek_el = soup.select_one("input.lastEvaluatedKey")
-    rendered_el = soup.select_one("input.itemsRenderedSoFar")
-
-    if not lek_el or not rendered_el:
-        return None, None
-
-    raw_token = lek_el.get("value")
-    token = str(raw_token).strip() if raw_token is not None else None
-
-    raw_rendered = rendered_el.get("value")
-    rendered = str(raw_rendered).strip() if raw_rendered is not None else None
-
-    if not token or not rendered:
-        return None, None
-
-    logger.debug(
-        "Detected pagination token: lastEvaluatedKey length=%d, itemsRenderedSoFar=%s",
-        len(token),
-        rendered,
-    )
-    return token, rendered
+    scripts = soup.find_all("script", attrs={"type": "a-state"})
+    for script in scripts:
+        raw = script.get_text(strip=True)
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        show_more = data.get("showMoreUrl")
+        if show_more:
+            logger.debug("Found showMoreUrl for pagination: %s", show_more)
+            # We only really care about the URL; the second value is kept for type compatibility.
+            return str(show_more), "1"
+    return None, None
 
 
 def _build_next_url(current_url: str, token: str, rendered: str) -> str:
-    """Build the next-page URL using lastEvaluatedKey and itemsRenderedSoFar."""
+    """Build the next-page URL.
+
+    If `token` looks like a URL/path (from showMoreUrl), treat it directly
+    as the next URL (relative or absolute). Otherwise, fall back to the
+    legacy query-parameter approach using lastEvaluatedKey/itemsRenderedSoFar.
+    """
+    # Primary path: token is a URL or path (from showMoreUrl)
+    if token.startswith("http://") or token.startswith("https://") or token.startswith("/"):
+        next_url = ensure_absolute_url(token)
+        logger.debug("Next page URL (showMoreUrl) built as: %s", next_url)
+        return next_url
+
+    # Fallback: legacy behavior using query parameters
     parsed = urlparse(current_url)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
     query["lastEvaluatedKey"] = token
@@ -191,7 +204,7 @@ def _build_next_url(current_url: str, token: str, rendered: str) -> str:
     new_query = urlencode(query, doseq=True)
     new_parsed = parsed._replace(query=new_query)
     next_url = urlunparse(new_parsed)
-    logger.debug("Next page URL built as: %s", next_url)
+    logger.debug("Next page URL (legacy token) built as: %s", next_url)
     return next_url
 
 

@@ -168,6 +168,7 @@ def run_once():
     storage.ensure_db()
     cfg = load_config()
     wishlists = cfg.get("wishlists", [])
+    random.shuffle(wishlists)  # Option B randomization
     for wl in wishlists:
         try:
             process_wishlist(wl)

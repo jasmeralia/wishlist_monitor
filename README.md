@@ -199,7 +199,8 @@ AMAZON_MIN_SPACING="45"   # minimum seconds between any two Amazon wishlist fetc
 AMAZON_MAX_PAGES="50"     # maximum number of Amazon wishlist pages to process
 PAGE_SLEEP="5"            # delay after each fetched page
 CAPTCHA_SLEEP="600"       # delay when CAPTCHA is encountered
-FAIL_SLEEP="30"           # delay after non-200 Amazon responses
+FAIL_SLEEP="30"
+AMAZON_MAX_PAGE_RETRIES="3"     # number of retries per page before aborting           # delay after non-200 Amazon responses
 ```
 
 - `AMAZON_MIN_SPACING` spaces out Amazon wishlist fetches globally to reduce CAPTCHA and rate limiting issues.

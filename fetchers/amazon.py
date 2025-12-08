@@ -1,287 +1,219 @@
-# fetchers/amazon.py
 import os
-import re
 import time
-import random
-from typing import List, Optional
-
 import requests
-from bs4 import BeautifulSoup
-
-from core.models import Item
+from typing import Optional
+from urllib.parse import urlparse
+from bs4 import BeautifulSoup, Tag
 from core.logger import get_logger
+from core.models import Item
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 logger = get_logger(__name__)
 
-# Mobile wishlist URL template
-MOBILE_LIST_URL = "https://www.amazon.com/gp/aw/ls?lid={}&ty=wishlist"
+BASE_URL = "https://www.amazon.com"
 
-# ENV settings (compatible with your previous script)
+# AMAZON_MIN_SPACING: minimum delay between any two Amazon fetches (in seconds)
+AMAZON_MIN_SPACING = int(os.getenv("AMAZON_MIN_SPACING", "45"))
+_last_amazon_fetch_ts = 0.0
+
+# Retry logic
+MAX_RETRIES = int(os.getenv("AMAZON_MAX_RETRIES", "3"))
+RETRY_MULTIPLIER = int(os.getenv("AMAZON_RETRY_MULTIPLIER", "2"))
+RETRY_MIN = int(os.getenv("AMAZON_RETRY_MIN", "1"))
+RETRY_MAX = int(os.getenv("AMAZON_RETRY_MAX", "10"))
+
+# Sleep values when encountering CAPTCHA or fetch failures
 PAGE_SLEEP = int(os.getenv("PAGE_SLEEP", "5"))
-FAIL_SLEEP = int(os.getenv("FAIL_SLEEP", "600"))
-RETRY_COUNT = int(os.getenv("RETRY_COUNT", "3"))
-RETRY_SLEEP = int(os.getenv("RETRY_SLEEP", "60"))
 CAPTCHA_SLEEP = int(os.getenv("CAPTCHA_SLEEP", "600"))
-DEBUG_HTML = os.getenv("AMAZON_DEBUG_HTML", "0") == "1"
-DEBUG_HTML_DIR = os.getenv("AMAZON_DEBUG_DIR", "/data/amazon_debug")
-
-TOP_MOBILE_USER_AGENTS = [
-    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.3",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3.1 Mobile/15E148 Safari/604.",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) GSA/360.1.737798518 Mobile/15E148 Safari/604.",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/134.0.6998.99 Mobile/15E148 Safari/604.",
-    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/27.0 Chrome/125.0.0.0 Mobile Safari/537.3",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1.1 Mobile/15E148 Safari/604.",
-    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.3",
-    "Mozilla/5.0 (Android 14; Mobile; rv:136.0) Gecko/136.0 Firefox/136.0",
-]
+FAIL_SLEEP = int(os.getenv("FAIL_SLEEP", "30"))
 
 
-def _get_random_user_agent() -> str:
-    return random.choice(TOP_MOBILE_USER_AGENTS)
+class AmazonError(Exception):
+    pass
 
 
-def _normalize_wishlist_url(url_or_id: str) -> str:
-    """
-    Normalize Amazon wishlist URLs / IDs to the mobile wishlist URL format.
-    If given just an ID, treat it as such.
-    """
-    s = url_or_id.strip()
-    if re.fullmatch(r"[A-Za-z0-9]+", s):
-        return MOBILE_LIST_URL.format(s)
-
-    m = re.search(r"/hz/wishlist/ls/([A-Za-z0-9]+)/?", s)
-    if not m:
-        m = re.search(r"/gp/registry/(?:wishlist|list)/([A-Za-z0-9]+)/?", s)
-    if m:
-        return MOBILE_LIST_URL.format(m.group(1))
-    return s
+def ensure_absolute_url(url: str) -> str:
+    """Return the URL as-is if it is absolute; otherwise prepend BASE_URL."""
+    parsed = urlparse(url)
+    if parsed.netloc:
+        return url
+    return f"{BASE_URL}{url}"
 
 
-def _format_price_to_cents(price_str: Optional[str]) -> int:
-    if not price_str:
-        return -1
-    try:
-        p = float(
-            str(price_str)
-            .replace("$", "")
-            .replace(",", "")
-            .replace("US$", "")
-            .strip()
-        )
-        return int(round(p * 100))
-    except Exception:
-        return -1
+def parse_item_div(div: Tag) -> Optional[Item]:
+    """Parse a single Amazon item div and return an Item object."""
+    data = div.get("data-itemid")
+    if not data or not isinstance(data, str):
+        logger.debug("Skipping div without data-itemid")
+        return None
+
+    item_id = data.strip()
+    name_el = div.select_one(".a-list-item .a-link-normal")
+    name = name_el.get_text(strip=True) if name_el else f"Item {item_id}"
+
+    url_el = div.select_one(".a-list-item .a-link-normal")
+    href_raw = url_el.get("href") if url_el else None
+    product_url = ensure_absolute_url(href_raw) if isinstance(href_raw, str) else ""
+
+    img_el = div.select_one("img")
+    src_raw = img_el.get("src") if img_el else None
+    image_url = src_raw if isinstance(src_raw, str) else ""
+
+    price_cents = -1
+    currency = "USD"
+
+    price_whole = None
+    price_frac = None
+
+    price_span = div.select_one(".a-price-whole")
+    frac_span = div.select_one(".a-price-fraction")
+
+    if price_span:
+        price_whole = price_span.get_text(strip=True).replace(",", "")
+    if frac_span:
+        price_frac = frac_span.get_text(strip=True).replace(",", "")
+
+    if price_whole is not None:
+        try:
+            if price_frac:
+                price_val = float(f"{price_whole}.{price_frac}")
+            else:
+                price_val = float(price_whole)
+            price_cents = int(round(price_val * 100))
+        except ValueError:
+            pass
+
+    available = price_cents >= 0
+
+    return Item(
+        item_id=item_id,
+        name=name,
+        price_cents=price_cents,
+        currency=currency,
+        product_url=product_url,
+        image_url=image_url,
+        available=available,
+    )
 
 
-def _maybe_debug_html(wishlist_name: str, suffix: str, html: str):
-    if not DEBUG_HTML:
-        return
-    try:
-        os.makedirs(DEBUG_HTML_DIR, exist_ok=True)
-        safe_name = re.sub(r"[^A-Za-z0-9]+", "_", wishlist_name) or "wishlist"
-        fname = os.path.join(
-            DEBUG_HTML_DIR, f"{safe_name}_{suffix}.html"
-        )
-        with open(fname, "w", encoding="utf-8") as f:
-            f.write(html)
-        logger.info("Amazon debug HTML written: %s", fname)
-    except Exception as e:
-        logger.warning("Failed to write Amazon debug HTML: %s", e)
+@retry(
+    stop=stop_after_attempt(MAX_RETRIES),
+    wait=wait_exponential(multiplier=RETRY_MIN, max=RETRY_MAX),
+    retry=retry_if_exception_type(AmazonError),
+)
+def fetch_page(url: str) -> str:
+    """Fetch a single Amazon wishlist page with retry and CAPTCHA detection."""
+    logger.debug("Fetching page URL: %s", url)
 
-
-def fetch_items(identifier: str, wishlist_name: str | None = None) -> Optional[List[Item]]:
-    """
-    Fetch all items from an Amazon wishlist (mobile view), returning a list of Items
-    or None on failure.
-    """
-    session = requests.Session()
-    url = _normalize_wishlist_url(identifier)
-    ua = _get_random_user_agent()
+    # Basic user agent spoofing
     headers = {
-        "User-Agent": ua,
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Safari/605.1.15"
+        ),
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Referer": "https://www.amazon.com/",
     }
+
+    resp = requests.get(url, headers=headers, timeout=30)
+
+    if resp.status_code == 503 or "captcha" in resp.text.lower():
+        logger.warning("CAPTCHA encountered at %s. Sleeping for %s seconds.", url, CAPTCHA_SLEEP)
+        time.sleep(CAPTCHA_SLEEP)
+        raise AmazonError("CAPTCHA encountered")
+
+    if resp.status_code != 200:
+        logger.warning("Amazon returned non-200 (%s) at %s; sleeping %s seconds",
+                       resp.status_code, url, FAIL_SLEEP)
+        time.sleep(FAIL_SLEEP)
+        raise AmazonError(f"Bad status code {resp.status_code}")
+
+    time.sleep(PAGE_SLEEP)
+    return resp.text
+
+
+def extract_items_from_html(html: str) -> list[Item]:
+    """Extract items from Amazon mobile wishlist HTML."""
+    soup = BeautifulSoup(html, "lxml")
+
+    divs = soup.select("div.g-item-sortable")
+    items = []
+
+    for div in divs:
+        if not isinstance(div, Tag):
+            continue
+        item = parse_item_div(div)
+        if item:
+            items.append(item)
+
+    return items
+
+
+def extract_next_page(html: str) -> Optional[str]:
+    """Return URL of next wishlist page, or None if none exists."""
+    soup = BeautifulSoup(html, "lxml")
+    link = soup.select_one("li.a-last a")
+    if link:
+        href_raw = link.get("href")
+        if isinstance(href_raw, str):
+            return ensure_absolute_url(href_raw)
+    return None
+
+
+def fetch_items(identifier: str, wishlist_name: Optional[str] = None) -> list[Item]:
+    """
+    Fetch and return the items for an Amazon wishlist.
+
+    identifier may be:
+      - a full URL like https://www.amazon.com/hz/wishlist/ls/XYZ
+      - a bare wishlist ID like XYZ
+    """
+    global _last_amazon_fetch_ts
+
+    if identifier.startswith("http://") or identifier.startswith("https://"):
+        url = identifier
+    else:
+        url = f"{BASE_URL}/hz/wishlist/ls/{identifier}"
 
     logger.info("Checking Amazon wishlist '%s' at %s", wishlist_name or identifier, url)
 
-    items: List[Item] = []
-    seen_keys: set[str] = set()
-    page = 1
-    next_url = url
-
-    try:
-        while next_url:
-            captcha_attempts = 0
-            while True:
-                for attempt in range(1, RETRY_COUNT + 1):
-                    try:
-                        resp = session.get(
-                            next_url, headers=headers, timeout=20
-                        )
-                        if resp.status_code == 200:
-                            break
-                        logger.warning(
-                            "Amazon page %d HTTP %d (attempt %d/%d)",
-                            page,
-                            resp.status_code,
-                            attempt,
-                            RETRY_COUNT,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "Amazon exception on page %d attempt %d/%d: %s",
-                            page,
-                            attempt,
-                            RETRY_COUNT,
-                            e,
-                        )
-                    if attempt < RETRY_COUNT:
-                        sd = random.uniform(
-                            RETRY_SLEEP * 0.5, RETRY_SLEEP * 1.5
-                        )
-                        logger.info(
-                            "Sleeping %.1fs before retrying Amazon page %d",
-                            sd,
-                            page,
-                        )
-                        time.sleep(sd)
-                    else:
-                        sd = random.uniform(
-                            FAIL_SLEEP * 0.5, FAIL_SLEEP * 1.5
-                        )
-                        logger.error(
-                            "Failed to fetch Amazon page %d after retries; sleeping %.1fs and aborting wishlist.",
-                            page,
-                            sd,
-                        )
-                        time.sleep(sd)
-                        return None
-
-                text_lower = resp.text.lower()
-                captcha_detected = (
-                    "captcha" in text_lower
-                    or "enter the characters you see" in text_lower
-                )
-                if captcha_detected:
-                    captcha_attempts += 1
-                    sd = random.uniform(
-                        CAPTCHA_SLEEP * 0.5, CAPTCHA_SLEEP * 1.5
-                    )
-                    logger.warning(
-                        "Amazon CAPTCHA detected on page %d (attempt %d/%d); sleeping %.1fs.",
-                        page,
-                        captcha_attempts,
-                        RETRY_COUNT,
-                        sd,
-                    )
-                    time.sleep(sd)
-                    if captcha_attempts < RETRY_COUNT:
-                        continue
-                    else:
-                        logger.error(
-                            "Max CAPTCHA retries reached for Amazon wishlist; aborting."
-                        )
-                        return None
-                break  # no captcha, proceed
-
-            soup = BeautifulSoup(resp.text, "html.parser")
-            li_items = soup.select("li[id^='itemWrapper_']")
-
-            if not li_items:
-                logger.warning(
-                    "Amazon: no items found on page %d for %s",
-                    page,
-                    wishlist_name or identifier,
-                )
-                _maybe_debug_html(
-                    wishlist_name or "wishlist",
-                    f"page{page}_no_items",
-                    resp.text,
-                )
-                break
-
-            page_count = 0
-            for li in li_items:
-                link = li.select_one("a[href^='/dp']")
-                if not link:
-                    continue
-                
-                href_raw = link.get("href")
-                if not isinstance(href_raw, str):
-                    continue
-                href = href_raw.split("?")[0]
-                if not href.startswith("http"):
-                    href = "https://www.amazon.com" + href
-                
-                title_el = li.select_one(".awl-item-title")
-                name = title_el.get_text(strip=True) if title_el else None
-                
-                price_elem = li.select_one("span.a-price-whole")
-                price_raw = price_elem.get_text(strip=True) if price_elem else None
-                if isinstance(price_raw, str):
-                    price_cents = _format_price_to_cents(price_raw)
-                else:
-                    price_cents = -1
-
-                key = href or name or ""
-                if not key:
-                    continue
-
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-
-                items.append(
-                    Item(
-                        item_id=key,
-                        name=name or "(no name)",
-                        price_cents=price_cents,
-                        currency="USD",
-                        product_url=href,
-                        image_url="",
-                        available=True,
-                    )
-                )
-                page_count += 1
-
-            logger.info(
-                "Amazon page %d: found %d new items (total %d)",
-                page,
-                page_count,
-                len(items),
-            )
-
-            token_input = soup.select_one(
-                "form.scroll-state input.showMoreUrl"
-            )
-            token_value = token_input.get("value") if token_input else None
-            if isinstance(token_value, str) and token_value:
-                next_url = "https://www.amazon.com" + token_value
-                page += 1
-                sd = random.uniform(
-                    PAGE_SLEEP * 0.5, PAGE_SLEEP * 1.5
-                )
-                logger.info(
-                    "Sleeping %.1fs before Amazon page %d", sd, page
-                )
-                time.sleep(sd)
-            else:
-                logger.info("Amazon pagination complete.")
-                break
-
-        return items
-
-    except Exception:
-        sd = random.uniform(FAIL_SLEEP * 0.5, FAIL_SLEEP * 1.5)
-        logger.exception(
-            "Amazon fetch exception for %s; sleeping %.1fs and aborting.",
-            identifier,
-            sd,
+    # ----------------------------------------------------------------------
+    # GLOBAL AMAZON FETCH SPACING (Option E)
+    # ----------------------------------------------------------------------
+    now = time.time()
+    since_last = now - _last_amazon_fetch_ts
+    if since_last < AMAZON_MIN_SPACING:
+        wait_for = AMAZON_MIN_SPACING - since_last
+        logger.info(
+            "Amazon fetch spacing: last request %.1fs ago; waiting %.1fs before fetching '%s'.",
+            since_last,
+            wait_for,
+            wishlist_name or identifier,
         )
-        time.sleep(sd)
-        return None
+        time.sleep(wait_for)
+
+    # Mark timestamp *before* making the request (prevents successive retries compressing together)
+    _last_amazon_fetch_ts = time.time()
+    # ----------------------------------------------------------------------
+
+    all_items: list[Item] = []
+    next_url: Optional[str] = url
+
+    for _ in range(20):  # guard against infinite loops
+        if not next_url:
+            break
+        logger.debug("Fetching Amazon page: %s", next_url)
+        html = fetch_page(next_url)
+
+        items = extract_items_from_html(html)
+        logger.debug("Extracted %d items from page.", len(items))
+        all_items.extend(items)
+
+        next_url = extract_next_page(html)
+
+    logger.info(
+        "Extracted %d total Amazon items for wishlist '%s'.",
+        len(all_items),
+        wishlist_name or identifier,
+    )
+
+    return all_items

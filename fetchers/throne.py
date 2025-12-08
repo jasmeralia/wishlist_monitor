@@ -119,7 +119,20 @@ def _extract_items_next_data(html: str) -> Optional[List[Item]]:
             or it.get("url_path")
             or ""
         )
-        image = it.get("image") or it.get("imageUrl") or ""
+
+        # Prefer explicit image fields from Throne JSON; fall back to extras.
+        image_val = (
+            it.get("imgLink")
+            or it.get("image")
+            or it.get("imageUrl")
+        )
+
+        if not image_val:
+            extra_imgs = it.get("extraImgLinks")
+            if isinstance(extra_imgs, list) and extra_imgs:
+                image_val = extra_imgs[0]
+
+        image = str(image_val) if image_val is not None else ""
         item_id = (
             it.get("id")
             or it.get("uuid")

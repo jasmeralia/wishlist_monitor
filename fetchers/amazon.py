@@ -16,6 +16,9 @@ BASE_URL = "https://www.amazon.com"
 AMAZON_MIN_SPACING = int(os.getenv("AMAZON_MIN_SPACING", "45"))
 _last_amazon_fetch_ts = 0.0
 
+# Maximum pages to paginate
+AMAZON_MAX_PAGES = int(os.getenv("AMAZON_MAX_PAGES", "50"))
+
 # Retry logic
 MAX_RETRIES = int(os.getenv("AMAZON_MAX_RETRIES", "3"))
 RETRY_MULTIPLIER = int(os.getenv("AMAZON_RETRY_MULTIPLIER", "2"))
@@ -198,7 +201,29 @@ def fetch_items(identifier: str, wishlist_name: Optional[str] = None) -> list[It
     all_items: list[Item] = []
     next_url: Optional[str] = url
 
-    for _ in range(20):  # guard against infinite loops
+    current_url = None
+    empty_pages = 0
+    for _ in range(AMAZON_MAX_PAGES):
+        # Per-page global Amazon spacing
+        now = time.time()
+        since_last = now - _last_amazon_fetch_ts
+        if since_last < AMAZON_MIN_SPACING:
+            wait_for = AMAZON_MIN_SPACING - since_last
+            logger.info(
+                "Amazon fetch spacing: last request %.1fs ago; waiting %.1fs before fetching '%s'.",
+                since_last,
+                wait_for,
+                wishlist_name or identifier,
+            )
+            time.sleep(wait_for)
+        _last_amazon_fetch_ts = time.time()
+
+        if next_url == current_url:
+            logger.warning("Pagination loop detected: next page is same as current. Stopping.")
+            break
+
+        current_url = next_url
+  # guard against infinite loops
         if not next_url:
             break
         logger.debug("Fetching Amazon page: %s", next_url)
@@ -206,6 +231,13 @@ def fetch_items(identifier: str, wishlist_name: Optional[str] = None) -> list[It
 
         items = extract_items_from_html(html)
         logger.debug("Extracted %d items from page.", len(items))
+        if len(items) == 0:
+            empty_pages += 1
+            if empty_pages >= 2:
+                logger.info("Two consecutive empty pages encountered. Ending pagination.")
+                break
+        else:
+            empty_pages = 0
         all_items.extend(items)
 
         next_url = extract_next_page(html)

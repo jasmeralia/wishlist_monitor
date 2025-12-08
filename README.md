@@ -192,6 +192,20 @@ MODE="daemon"          # "daemon" or "once"
     - Otherwise, the global `POLL_MINUTES`
 - In `once` mode, all wishlists are processed one time and the program exits.
 
+### Amazon-specific tuning
+
+```bash
+AMAZON_MIN_SPACING="45"   # minimum seconds between any two Amazon wishlist fetches
+AMAZON_MAX_PAGES="50"     # maximum number of Amazon wishlist pages to process
+PAGE_SLEEP="5"            # delay after each fetched page
+CAPTCHA_SLEEP="600"       # delay when CAPTCHA is encountered
+FAIL_SLEEP="30"           # delay after non-200 Amazon responses
+```
+
+- `AMAZON_MIN_SPACING` spaces out Amazon wishlist fetches globally to reduce CAPTCHA and rate limiting issues.
+- `AMAZON_MAX_PAGES` caps how many Amazon wishlist pages are crawled, preventing infinite pagination loops.
+- `PAGE_SLEEP`, `CAPTCHA_SLEEP`, and `FAIL_SLEEP` control per-page delays, CAPTCHA backoff, and error backoff respectively.
+
 ### Paths and logging
 
 ```bash

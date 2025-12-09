@@ -1,15 +1,18 @@
 import datetime
-import json
 import logging
 import math
 import os
+import random
+import re
 import time
 from pathlib import Path
-from typing import List, Optional
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from typing import Iterable
+
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 from core.logger import get_logger
 from core.models import Item
@@ -24,10 +27,10 @@ _last_amazon_fetch_ts: float = 0.0
 
 # Per-page / retry behaviour
 AMAZON_MAX_PAGES = int(os.getenv("AMAZON_MAX_PAGES", "50"))
-MAX_RETRIES = int(os.getenv("AMAZON_MAX_PAGE_RETRIES", "3"))
-PAGE_SLEEP = int(os.getenv("PAGE_SLEEP", "5"))
+AMAZON_MAX_PAGE_RETRIES = int(os.getenv("AMAZON_MAX_PAGE_RETRIES", "3"))
 CAPTCHA_SLEEP = int(os.getenv("CAPTCHA_SLEEP", "900"))
 FAIL_SLEEP = int(os.getenv("FAIL_SLEEP", "30"))
+PAGE_SLEEP = int(os.getenv("PAGE_SLEEP", "5"))
 
 DUMP_DIR = Path("/data/debug_dumps")
 DUMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -42,7 +45,7 @@ def _sanitize(name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in name)
 
 
-def _dump_html(wishlist_name: Optional[str], page_index: int, html: str) -> None:
+def _dump_html(wishlist_name: str | None, page_index: int, html: str) -> None:
     """Write HTML to a timestamped file when DEBUG logging is enabled."""
     if not logger.isEnabledFor(logging.DEBUG):
         return
@@ -57,91 +60,132 @@ def _dump_html(wishlist_name: Optional[str], page_index: int, html: str) -> None
         logger.debug("Failed to dump Amazon HTML to %s: %s", path, exc)
 
 
+def normalize_wishlist_url(url: str) -> str:
+    """
+    Normalize various Amazon wishlist URLs to the mobile wishlist URL format.
+
+    Examples of accepted inputs:
+      - https://www.amazon.com/hz/wishlist/ls/XXXXXXXXXXXX
+      - https://www.amazon.com/gp/registry/wishlist/XXXXXXXXXXXX
+      - https://www.amazon.com/gp/registry/list/XXXXXXXXXXXX
+    """
+    m = re.search(r"/hz/wishlist/ls/([A-Za-z0-9]+)/?", url)
+    if not m:
+        m = re.search(r"/gp/registry/(?:wishlist|list)/([A-Za-z0-9]+)/?", url)
+    if m:
+        lid = m.group(1)
+        return f"{BASE_URL}/gp/aw/ls?lid={lid}&ty=wishlist"
+    return url
+
+
 def ensure_absolute_url(url: str) -> str:
     parsed = urlparse(url)
     if parsed.scheme and parsed.netloc:
         return url
+    # treat as path on BASE_URL
+    if not url.startswith("/"):
+        url = "/" + url
     return f"{BASE_URL}{url}"
 
 
-def looks_like_captcha(html: str) -> bool:
-    """Detect Robot Check / CAPTCHA / automated-access blocking pages."""
-    lower_html = html.lower()
-    blocked = any(
-        marker in lower_html
-        for marker in (
-            "robot check",
-            "enter the characters you see below",
-            "/errors/validatecaptcha",
-            "to discuss automated access to amazon data",
-        )
-    )
-    if blocked:
-        logger.debug("HTML appears to be a CAPTCHA/blocked page.")
-    return blocked
+def looks_like_captcha_or_block(html: str) -> bool:
+    """Heuristically detect Robot Check / CAPTCHA / blocked pages on mobile."""
+    lower = html.lower()
+    if "robot check" in lower:
+        return True
+    if "enter the characters you see below" in lower:
+        return True
+    if "/errors/validatecaptcha" in lower:
+        return True
+    if "to discuss automated access to amazon data" in lower:
+        return True
+    if "type the characters you see in this image" in lower:
+        return True
+    return False
 
 
-def fetch_page(url: str) -> str:
-    """Fetch a single Amazon wishlist page (mobile-style layout)."""
+def fetch_page_raw(session: requests.Session, url: str, headers: dict[str, str]) -> str:
+    """Fetch a single Amazon wishlist page."""
     logger.debug("Fetching Amazon page: %s", url)
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 "
-            "Mobile/15A372 Safari/604.1"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    resp = requests.get(url, headers=headers, timeout=30)
+    resp = session.get(url, headers=headers, timeout=30)
     status = resp.status_code
+    text = resp.text
+
+    if status == 503:
+        logger.warning(
+            "Amazon returned 503 at %s (possible CAPTCHA or rate limiting).",
+            url,
+        )
+        raise AmazonError("503 Service Unavailable")
+
     if status != 200:
-        logger.debug("Amazon response status=%s, length=%d", status, len(resp.text))
-        raise AmazonError(f"Bad status {status}")
-    return resp.text
+        logger.warning("Amazon returned status %s at %s.", status, url)
+        raise AmazonError(f"Bad status code {status}")
+
+    return text
 
 
-def parse_item_li(li) -> Item:
+def _text_or_empty(tag: Tag | None) -> str:
+    return tag.get_text(strip=True) if tag is not None else ""
+
+
+def _select_first(root: Tag | BeautifulSoup, selectors: Iterable[str]) -> Tag | None:
+    """Select the first tag that matches any of the given CSS selectors."""
+    for sel in selectors:
+        found = root.select_one(sel)
+        if found is not None:
+            return found
+    return None
+
+
+def parse_item_li(li: Tag) -> Item:
     """Parse a single wishlist item block into an Item."""
     item_id = str(li.get("id") or "")
 
     # Image
+    image_url = ""
     img_el = li.select_one("img")
-    image_url = img_el["src"] if img_el is not None and img_el.has_attr("src") else ""
-    if image_url:
-        image_url = ensure_absolute_url(image_url)
+    if img_el is not None:
+        src_val = img_el.get("src")
+        if isinstance(src_val, str) and src_val:
+            image_url = ensure_absolute_url(src_val)
 
     # URL
-    url_el = li.select_one("a[href*='/dp/']")
     product_url = ""
-    if url_el is not None and url_el.has_attr("href"):
-        product_url = ensure_absolute_url(url_el["href"])
+    url_el = li.select_one("a[href*='/dp/']")
+    if url_el is not None:
+        href_val = url_el.get("href")
+        if isinstance(href_val, str) and href_val:
+            # strip query for stability
+            href_clean = href_val.split("?", 1)[0]
+            product_url = ensure_absolute_url(href_clean)
 
     # Title
-    title_el = li.select_one("h3, h2, span.a-size-base")
-    name = title_el.get_text(strip=True) if title_el is not None else item_id
+    title_el = _select_first(li, ["h3", "h2", ".awl-item-title", "span.a-size-base", "span.a-size-medium"])
+    name = _text_or_empty(title_el) or item_id
 
     # Price: prefer data-price on container when present
     price_cents = -1
     currency = "USD"
 
-    raw_price = li.get("data-price")
-    if raw_price is not None:
+    raw_price_val = li.get("data-price")
+    raw_price_str = str(raw_price_val) if isinstance(raw_price_val, (str, int, float)) else None
+    if raw_price_str:
         try:
-            price_value = float(str(raw_price))
+            price_value = float(raw_price_str)
             if math.isfinite(price_value):
                 price_cents = int(round(price_value * 100))
             else:
-                logger.debug("Non-finite price %r for item %s", raw_price, item_id)
+                logger.debug("Non-finite price %r for item %s", raw_price_str, item_id)
         except ValueError:
-            logger.debug("Failed to parse data-price %r for item %s", raw_price, item_id)
+            logger.debug("Failed to parse data-price %r for item %s", raw_price_str, item_id)
     else:
         # Fallback to whole + fraction layout
         pw = li.select_one(".a-price-whole")
         pf = li.select_one(".a-price-fraction")
-
         if pw is not None:
-            whole_str = pw.get_text(strip=True).replace(",", "")
-            frac_str = pf.get_text(strip=True) if pf is not None else "00"
+            whole_str = _text_or_empty(pw).replace(",", "")
+            frac_str = _text_or_empty(pf) if pf is not None else "00"
             try:
                 whole_val = int(whole_str)
                 frac_val = int(frac_str)
@@ -176,203 +220,200 @@ def parse_item_li(li) -> Item:
     )
 
 
-def extract_items(html: str) -> List[Item]:
-    """Extract all wishlist items from the given HTML."""
-    soup = BeautifulSoup(html, "html.parser")
-    li_items = soup.select("li.awl-item-wrapper, li.g-item-sortable")
-    logger.debug("Found %d Amazon item container <li> elements", len(li_items))
+def extract_items_from_soup(soup: BeautifulSoup) -> list[Item]:
+    """Extract items from Amazon mobile wishlist HTML soup."""
+    containers = soup.select("li.awl-item-wrapper, li.g-item-sortable, div.g-item-sortable")
+    logger.debug("Found %d Amazon item containers on page.", len(containers))
 
-    items: List[Item] = []
-    for li in li_items:
+    items: list[Item] = []
+    for li in containers:
         try:
-            item = parse_item_li(li)
-            items.append(item)
+            items.append(parse_item_li(li))
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("Failed to parse an item block: %s", exc)
     return items
 
 
-def _extract_pagination_url(html: str, current_url: str) -> Optional[str]:
-    """Extract the next-page URL, if any.
-
-    Prefer `showMoreUrl` from <script type="a-state"> JSON; fall back to
-    lastEvaluatedKey/itemsRenderedSoFar hidden inputs when present.
-    """
-    soup = BeautifulSoup(html, "html.parser")
-
-    # First, try script[type="a-state"] with showMoreUrl
-    scripts = soup.find_all("script", attrs={"type": "a-state"})
-    for script in scripts:
-        raw = script.get_text(strip=True)
-        if not raw:
-            continue
-        try:
-            data = json.loads(raw)
-        except Exception:
-            continue
-        if not isinstance(data, dict):
-            continue
-        show_more = data.get("showMoreUrl")
-        if show_more:
-            show_more_str = str(show_more)
-            # Absolute or relative path
-            next_url = ensure_absolute_url(show_more_str)
-            logger.debug("Pagination via showMoreUrl: %s", next_url)
-            return next_url
-
-    # Fallback: hidden lastEvaluatedKey/itemsRenderedSoFar
-    lek_el = soup.select_one("input.lastEvaluatedKey")
-    rendered_el = soup.select_one("input.itemsRenderedSoFar")
-    if lek_el is not None and rendered_el is not None:
-        raw_token = lek_el.get("value")
-        raw_rendered = rendered_el.get("value")
-
-        token = str(raw_token).strip() if raw_token is not None else ""
-        rendered = str(raw_rendered).strip() if raw_rendered is not None else ""
-
-        if token and rendered:
-            parsed = urlparse(current_url)
-            query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-            query["lastEvaluatedKey"] = token
-            query["itemsRenderedSoFar"] = rendered
-            new_query = urlencode(query, doseq=True)
-            new_parsed = parsed._replace(query=new_query)
-            next_url = urlunparse(new_parsed)
-            logger.debug(
-                "Pagination via lastEvaluatedKey/itemsRenderedSoFar: %s", next_url
-            )
-            return next_url
-
-    logger.debug("No pagination token found on page; assuming last page.")
-    return None
-
-
-def _apply_spacing(wishlist_name: Optional[str]) -> None:
-    """Enforce minimum spacing between Amazon fetches across wishlists."""
+def _apply_global_spacing(wishlist_name: str | None, identifier: str) -> None:
+    """Apply global Amazon fetch spacing based on AMAZON_MIN_SPACING."""
     global _last_amazon_fetch_ts
     now = time.time()
-    elapsed = now - _last_amazon_fetch_ts
-    if elapsed < AMAZON_MIN_SPACING:
-        wait_time = AMAZON_MIN_SPACING - elapsed
-        logger.debug(
-            "Amazon fetch spacing: last request %.1fs ago; waiting %.1fs before '%s'.",
-            elapsed,
-            wait_time,
-            wishlist_name or "<unknown>",
+    since_last = now - _last_amazon_fetch_ts
+    if since_last < AMAZON_MIN_SPACING:
+        wait_for = AMAZON_MIN_SPACING - since_last
+        logger.info(
+            "Amazon fetch spacing: last request %.1fs ago; waiting %.1fs before fetching '%s'.",
+            since_last,
+            wait_for,
+            wishlist_name or identifier,
         )
-        time.sleep(wait_time)
+        time.sleep(wait_for)
     _last_amazon_fetch_ts = time.time()
 
 
-def fetch_items(identifier: str, wishlist_name: Optional[str] = None) -> List[Item]:
+def fetch_items(identifier: str, wishlist_name: str | None = None) -> list[Item]:
     """
-    Fetch all items for a given Amazon wishlist (mobile version).
+    Fetch all items for a given Amazon wishlist using the mobile wishlist layout.
 
     identifier may be:
       - a full URL like https://www.amazon.com/hz/wishlist/ls/XYZ
       - a bare wishlist ID like XYZ
     """
+    session = requests.Session()
+
     if identifier.startswith("http://") or identifier.startswith("https://"):
-        url = identifier
+        first_url = normalize_wishlist_url(identifier)
     else:
-        url = f"{BASE_URL}/hz/wishlist/ls/{identifier}"
+        # Assume bare wishlist ID
+        first_url = f"{BASE_URL}/gp/aw/ls?lid={identifier}&ty=wishlist"
 
-    logger.info("Checking Amazon wishlist '%s' at %s", wishlist_name or identifier, url)
+    logger.info("Checking Amazon wishlist '%s' at %s", wishlist_name or identifier, first_url)
 
-    all_items: List[Item] = []
-    next_url: Optional[str] = url
-    current_url: Optional[str] = None
-    empty_pages = 0
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 "
+            "Mobile/15A372 Safari/604.1"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://www.amazon.com/",
+    }
 
-    for page_index in range(AMAZON_MAX_PAGES):
-        if not next_url:
-            logger.debug("No next URL at page %d; stopping pagination.", page_index)
-            break
+    all_items: list[Item] = []
+    seen_ids: set[str] = set()
+    next_url: str | None = first_url
+    page = 0
 
-        if next_url == current_url:
-            logger.warning("Pagination loop detected at %s; stopping.", current_url)
-            break
+    while next_url is not None and page < AMAZON_MAX_PAGES:
+        _apply_global_spacing(wishlist_name, identifier)
 
         current_url = next_url
-        _apply_spacing(wishlist_name)
-
         attempt = 0
-        html: Optional[str] = None
+        html: str | None = None
+
         while True:
             try:
-                html = fetch_page(current_url)
-                if looks_like_captcha(html):
+                html = fetch_page_raw(session, current_url, headers=headers)
+                if looks_like_captcha_or_block(html):
+                    attempt += 1
+                    if attempt >= AMAZON_MAX_PAGE_RETRIES:
+                        logger.warning(
+                            "CAPTCHA/robot page persisted for wishlist '%s' at %s; giving up for this run.",
+                            wishlist_name or identifier,
+                            current_url,
+                        )
+                        return all_items
+                    sleep_for = random.uniform(CAPTCHA_SLEEP * 0.5, CAPTCHA_SLEEP * 1.5)
                     logger.warning(
-                        "CAPTCHA/robot page detected for wishlist '%s'; "
-                        "sleeping %s seconds before retry.",
+                        "Detected CAPTCHA/robot page for wishlist '%s' at %s; sleeping %.1fs before retry (%d/%d).",
                         wishlist_name or identifier,
-                        CAPTCHA_SLEEP,
+                        current_url,
+                        sleep_for,
+                        attempt,
+                        AMAZON_MAX_PAGE_RETRIES,
                     )
-                    time.sleep(CAPTCHA_SLEEP)
-                    # Do NOT count against MAX_RETRIES; just retry
+                    time.sleep(sleep_for)
                     continue
-
-                # We have a plausible HTML page; proceed
                 break
-
-            except AmazonError as exc:
+            except (requests.RequestException, AmazonError) as exc:
                 attempt += 1
+                if attempt >= AMAZON_MAX_PAGE_RETRIES:
+                    logger.error(
+                        "Failed to fetch Amazon page %s for wishlist '%s' after %d attempts: %s. "
+                        "Aborting this wishlist for this run.",
+                        current_url,
+                        wishlist_name or identifier,
+                        attempt,
+                        exc,
+                    )
+                    return all_items
+                sleep_for = random.uniform(FAIL_SLEEP * 0.5, FAIL_SLEEP * 1.5)
                 logger.warning(
-                    "Error fetching %s for wishlist '%s' (attempt %d/%d): %s",
+                    "Error fetching Amazon page %s for wishlist '%s' (attempt %d/%d): %s. "
+                    "Sleeping %.1fs before retry.",
                     current_url,
                     wishlist_name or identifier,
                     attempt,
-                    MAX_RETRIES,
+                    AMAZON_MAX_PAGE_RETRIES,
                     exc,
+                    sleep_for,
                 )
-                if attempt >= MAX_RETRIES:
-                    logger.error(
-                        "Failed to fetch %s after %d attempts; aborting wishlist '%s'.",
-                        current_url,
-                        attempt,
-                        wishlist_name or identifier,
-                    )
-                    return all_items
-                logger.debug("Sleeping %s seconds before retry.", FAIL_SLEEP)
-                time.sleep(FAIL_SLEEP)
+                time.sleep(sleep_for)
+                continue
 
         if html is None:
-            logger.error("No HTML returned for %s; aborting wishlist '%s'.", current_url, wishlist_name or identifier)
+            logger.error(
+                "No HTML returned for %s; aborting wishlist '%s'.",
+                current_url,
+                wishlist_name or identifier,
+            )
             return all_items
 
-        _dump_html(wishlist_name, page_index, html)
+        _dump_html(wishlist_name, page, html)
 
-        page_items = extract_items(html)
+        soup = BeautifulSoup(html, "html.parser")
+        li_nodes = soup.select("li.awl-item-wrapper, li.g-item-sortable, div.g-item-sortable")
+
+        if not li_nodes:
+            logger.info(
+                "No item containers found on Amazon wishlist '%s' page %d; ending pagination.",
+                wishlist_name or identifier,
+                page,
+            )
+            break
+
+        page_new_count = 0
+        for li in li_nodes:
+            try:
+                item = parse_item_li(li)
+            except Exception as exc:
+                logger.debug("Failed to parse item on wishlist '%s' page %d: %s", wishlist_name or identifier, page, exc)
+                continue
+            if item.item_id in seen_ids:
+                continue
+            seen_ids.add(item.item_id)
+            all_items.append(item)
+            page_new_count += 1
+
         logger.debug(
-            "Page %d yielded %d items for wishlist '%s'.",
-            page_index,
-            len(page_items),
+            "Amazon wishlist '%s' page %d yielded %d new items (%d total so far).",
             wishlist_name or identifier,
+            page,
+            page_new_count,
+            len(all_items),
         )
 
-        if not page_items:
-            empty_pages += 1
-            logger.debug("Empty Amazon page detected (%d consecutive).", empty_pages)
-            if empty_pages >= 2:
-                logger.info(
-                    "Two consecutive empty pages for wishlist '%s'; ending pagination.",
-                    wishlist_name or identifier,
-                )
-                break
-        else:
-            empty_pages = 0
-
-        all_items.extend(page_items)
-
-        # Sleep before the *next* page fetch, not before dumping/parsing
-        if PAGE_SLEEP > 0:
-            logger.debug(
-                "PAGE_SLEEP: sleeping %s seconds before next Amazon request",
-                PAGE_SLEEP,
+        # If no new items on this page, stop (pre-unified behaviour)
+        if page_new_count == 0:
+            logger.info(
+                "No new items on Amazon wishlist '%s' page %d; ending pagination.",
+                wishlist_name or identifier,
+                page,
             )
-            time.sleep(PAGE_SLEEP)
+            break
 
-        next_url = _extract_pagination_url(html, current_url)
+        # Find next pagination token from mobile wishlist hidden form
+        token_input = soup.select_one("form.scroll-state input.showMoreUrl")
+        token_val = token_input.get("value") if token_input is not None else None
+
+        if isinstance(token_val, str) and token_val:
+            next_url = ensure_absolute_url(token_val)
+            page += 1
+            sleep_for = random.uniform(PAGE_SLEEP * 0.5, PAGE_SLEEP * 1.5)
+            logger.debug(
+                "Sleeping %.1fs before fetching next Amazon wishlist page %d for '%s'.",
+                sleep_for,
+                page,
+                wishlist_name or identifier,
+            )
+            time.sleep(sleep_for)
+        else:
+            logger.debug(
+                "No further pages (no showMoreUrl) for Amazon wishlist '%s'; pagination complete.",
+                wishlist_name or identifier,
+            )
+            break
 
     logger.info(
         "Extracted %d total Amazon items for wishlist '%s'.",

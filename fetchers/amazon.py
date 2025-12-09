@@ -246,6 +246,7 @@ def _apply_global_spacing(wishlist_name: str | None, identifier: str, page: int)
             since_last,
             wait_for,
             wishlist_name or identifier,
+            page,
         )
         time.sleep(wait_for)
     _last_amazon_fetch_ts = time.time()

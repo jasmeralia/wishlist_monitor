@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Tuple
 from core.logger import get_logger
 from core import storage
 from core.diff import diff_items
-from core.report_html import build_html_report, build_plaintext_report
+from core.report_html import build_html_report
 from core.emailer import send_email, get_global_recipients
 from fetchers import FETCHERS
 
@@ -117,16 +117,13 @@ def process_wishlist(wl: Dict[str, Any]) -> None:
     html_body = build_html_report(
         platform, name, wishlist_id, added, removed, price_changes, previous_count, new_count
     )
-    text_body = build_plaintext_report(
-        platform, name, wishlist_id, added, removed, price_changes, previous_count, new_count
-    )
 
     recipients = get_recipients_for_wishlist(wl)
     if not recipients:
         logger.error("No recipients for wishlist '%s' (platform=%s).", name, platform)
         return
 
-    send_email(subject, html_body, text_body, recipients)
+    send_email(subject, html_body, None, recipients)
 
 
 def _wishlist_debug_id(wl: Dict[str, Any]) -> str:

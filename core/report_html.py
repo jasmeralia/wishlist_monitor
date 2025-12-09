@@ -1,10 +1,12 @@
 import os
 from pathlib import Path
 from typing import List, Tuple
+
 from jinja2 import Environment, FileSystemLoader
+
 from core.models import Item
 
-# Resolve template directory relative to this file
+# Resolve template directory relative to this file:
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
 env = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)))
 
@@ -12,36 +14,13 @@ EMAIL_THEME = os.getenv("EMAIL_THEME", "dark").strip().lower()
 if EMAIL_THEME not in ("light", "dark"):
     EMAIL_THEME = "dark"
 
-THEMES = {
-    "light": {
-        "page_bg": "#f5f5f5",
-        "card_bg": "#ffffff",
-        "card_border": "#e0e0e0",
-        "text_primary": "#202124",
-        "text_secondary": "#555",
-        "text_muted": "#999",
-        "price_increase": "#c62828",
-        "price_decrease": "#2e7d32",
-        "link_color": "#1a73e8",
-    },
-    "dark": {
-        "page_bg": "#121212",
-        "card_bg": "#1E1E1E",
-        "card_border": "#333333",
-        "text_primary": "#F1F1F1",
-        "text_secondary": "#BBBBBB",
-        "text_muted": "#777777",
-        "price_increase": "#FF6B6B",
-        "price_decrease": "#4CAF50",
-        "link_color": "#8AB4F8",
-    },
-}
 
 def _cents_to_str(cents: int | None, currency: str = "USD") -> str:
     if cents is None or cents < 0:
         return "Unavailable"
     sym = "$" if currency == "USD" else ""
-    return f"{sym}{cents/100:.2f}"
+    return f"{sym}{cents / 100:.2f}"
+
 
 def build_plaintext_report(
     platform: str,
@@ -53,7 +32,14 @@ def build_plaintext_report(
     previous_count: int,
     new_count: int,
 ) -> str:
+    """Render the plaintext version using templates/email_text.txt."""
     template = env.get_template("email_text.txt")
+
+    summary_text = (
+        f"{len(added)} added · {len(removed)} removed · "
+        f"{len(price_changes)} price changes\n"
+        f"Previous: {previous_count} · Current: {new_count}"
+    )
 
     added_data = [
         {
@@ -85,8 +71,6 @@ def build_plaintext_report(
             }
         )
 
-    summary_text = f"{len(added)} added · {len(removed)} removed · {len(price_changes)} price changes\nPrevious: {previous_count} · Current: {new_count}"
-
     ctx = {
         "platform": platform,
         "wishlist_name": wishlist_name,
@@ -99,6 +83,7 @@ def build_plaintext_report(
 
     return template.render(**ctx)
 
+
 def build_html_report(
     platform: str,
     wishlist_name: str,
@@ -109,8 +94,9 @@ def build_html_report(
     previous_count: int,
     new_count: int,
 ) -> str:
-    template = env.get_template(f"email_{EMAIL_THEME}.html")
-    colors = THEMES[EMAIL_THEME]
+    """Render the HTML version using email_dark.html / email_light.html."""
+    template_name = f"email_{EMAIL_THEME}.html"
+    template = env.get_template(template_name)
 
     added_data = [
         {
@@ -129,13 +115,13 @@ def build_html_report(
         before_str = _cents_to_str(before, it.currency)
         after_str = _cents_to_str(after, it.currency)
         pct_str = ""
-        color = colors["text_secondary"]
+        color = "#BBBBBB"
         if before and before > 0 and after and after > 0:
             delta = after - before
             pct = abs(delta) * 100.0 / abs(before)
             sign = "+" if delta > 0 else "-"
             pct_str = f"({sign}{pct:.1f}%)"
-            color = colors["price_increase"] if delta > 0 else colors["price_decrease"]
+            color = "#FF6B6B" if delta > 0 else "#4CAF50"
         price_change_data.append(
             {
                 "item": {
@@ -151,9 +137,8 @@ def build_html_report(
         )
 
     summary_html = (
-        f"<div style='color:{colors['text_secondary']}'>"
-        f"<strong>Summary:</strong> {len(added)} added · {len(removed)} removed · "
-        f"{len(price_changes)} price changes<br>"
+        f"<div><strong>Summary:</strong> {len(added)} added · "
+        f"{len(removed)} removed · {len(price_changes)} price changes<br>"
         f"Previous: {previous_count} · Current: {new_count}</div>"
     )
 
@@ -166,7 +151,6 @@ def build_html_report(
         "added": added_data,
         "removed": removed_data,
         "price_changes": price_change_data,
-        "colors": colors,
     }
 
     return template.render(**ctx)

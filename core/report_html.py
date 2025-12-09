@@ -28,6 +28,7 @@ def build_html_report(
     price_changes: List[Tuple[Item, int, int]],
     previous_count: int,
     new_count: int,
+    wishlist_url: str | None = None,
 ) -> str:
 
     template = env.get_template(f"email_{EMAIL_THEME}.html")
@@ -84,5 +85,6 @@ def build_html_report(
         added=added_data,
         removed=removed_data,
         price_changes=price_change_data,
-        title=f"Wishlist update – {platform}",
+        title=f"{platform.capitalize()} Wishlist Update: {wishlist_name}",
+        wishlist_url=wishlist_url,
     )

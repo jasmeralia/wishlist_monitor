@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="color-scheme" content="light">
-  <title>{{ title or ("Wishlist update – " ~ platform|capitalize) }}</title>
+  <title>{{ title or ((platform|capitalize) ~ " Wishlist Update" ~ (wishlist_name and (": " ~ wishlist_name) or "")) }}</title>
 
   <style>
     body {
@@ -33,7 +33,10 @@
 <body>
   <div class="container">
 
-    <h2>Wishlist update – {{ platform|capitalize }}</h2>
+    <h2>{{ platform|capitalize }} Wishlist Update{% if wishlist_name %}: {{ wishlist_name }}{% endif %}</h2>
+    {% if wishlist_url %}
+      <div style="margin-bottom:8px;"><a href="{{ wishlist_url }}">View wishlist</a></div>
+    {% endif %}
     <div>{{ summary_html|safe }}</div>
 
     {% if added %}

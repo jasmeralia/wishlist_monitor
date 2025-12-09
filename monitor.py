@@ -18,6 +18,19 @@ MODE = os.getenv("MODE", "daemon").lower()  # "daemon" or "once"
 CONFIG_PATH = os.getenv("CONFIG_PATH", "/data/config.json")
 
 
+def _wishlist_url(platform: str, identifier: str) -> str | None:
+    platform = platform.strip().lower()
+    if not identifier:
+        return None
+    if identifier.startswith("http://") or identifier.startswith("https://"):
+        return identifier
+    if platform == "amazon":
+        return f"https://www.amazon.com/hz/wishlist/ls/{identifier}"
+    if platform == "throne":
+        return f"https://throne.com/{identifier}"
+    return None
+
+
 def jitter_sleep_minutes(minutes: int) -> None:
     base = max(1, minutes)
     jitter = random.uniform(-0.1 * base, 0.1 * base)
@@ -115,7 +128,15 @@ def process_wishlist(wl: Dict[str, Any]) -> None:
 
     subject = f"[Wishlist Monitor] Changes detected on {platform.capitalize()} for {name}"
     html_body = build_html_report(
-        platform, name, wishlist_id, added, removed, price_changes, previous_count, new_count
+        platform,
+        name,
+        wishlist_id,
+        added,
+        removed,
+        price_changes,
+        previous_count,
+        new_count,
+        wishlist_url=_wishlist_url(platform, identifier),
     )
 
     recipients = get_recipients_for_wishlist(wl)

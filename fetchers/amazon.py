@@ -20,6 +20,7 @@ from core.models import Item
 logger = get_logger(__name__)
 
 BASE_URL = "https://www.amazon.com"
+DEBUG_DIR = Path(os.getenv("DEBUG_DIR", "/data/debug_dumps"))
 
 # Global Amazon fetch spacing (seconds between any two wishlist page fetches)
 AMAZON_MIN_SPACING = int(os.getenv("AMAZON_MIN_SPACING", "45"))
@@ -32,8 +33,7 @@ CAPTCHA_SLEEP = int(os.getenv("CAPTCHA_SLEEP", "900"))
 FAIL_SLEEP = int(os.getenv("FAIL_SLEEP", "30"))
 PAGE_SLEEP = int(os.getenv("PAGE_SLEEP", "5"))
 
-DUMP_DIR = Path("/data/debug_dumps")
-DUMP_DIR.mkdir(parents=True, exist_ok=True)
+DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class AmazonError(Exception):
@@ -52,7 +52,7 @@ def _dump_html(wishlist_name: str | None, page_index: int, html: str) -> None:
 
     timestamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     safe = _sanitize(wishlist_name or "unknown")
-    path = DUMP_DIR / f"amazon_{safe}_page{page_index}_{timestamp}.html"
+    path = DEBUG_DIR / f"amazon_{safe}_page{page_index}_{timestamp}.html"
     try:
         path.write_text(html, encoding="utf-8")
         logger.debug("Dumped Amazon HTML to %s", path)

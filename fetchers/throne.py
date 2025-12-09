@@ -21,10 +21,10 @@ def _dump_html_debug(wishlist_name: str | None, html: str) -> None:
     if not logger.isEnabledFor(logging.DEBUG):
         return
     try:
-        os.makedirs("/data/debug_dumps", exist_ok=True)
+        os.makedirs(DEBUG_DIR, exist_ok=True)
         ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", wishlist_name or "unknown")
-        path = f"/data/debug_dumps/throne_{safe}_{ts}.html"
+        path = os.path.join(DEBUG_DIR, f"throne_{safe}_{ts}.html")
         with open(path, "w", encoding="utf-8") as f:
             f.write(html)
         logger.debug("Throne HTML dumped to %s", path)
@@ -39,8 +39,7 @@ USER_AGENT = os.getenv(
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 )
 PROXY_URL = os.getenv("THRONE_PROXY_URL", "").strip()
-DEBUG_DUMP_HTML = os.getenv("THRONE_DEBUG_DUMP_HTML", "true").lower() == "true"
-DEBUG_DIR = os.getenv("THRONE_DEBUG_DIR", "/data/throne_debug")
+DEBUG_DIR = os.getenv("DEBUG_DIR", "/data/debug_dumps")
 DEBUG_LOG_SAMPLES = os.getenv("THRONE_DEBUG_LOG_SAMPLES", "true").lower() == "true"
 
 SESSION = requests.Session()
@@ -383,7 +382,7 @@ def fetch_items(identifier: str, wishlist_name: str | None = None) -> Optional[L
         items = _extract_items_grid(html)
 
     if not items:
-        if DEBUG_DUMP_HTML:
+        if logger.isEnabledFor(logging.DEBUG):
             try:
                 os.makedirs(DEBUG_DIR, exist_ok=True)
                 safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", url)

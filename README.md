@@ -178,10 +178,18 @@ SMTP_USE_SSL="false"
 - If a wishlist has its own `recipients`, they override `EMAIL_TO`.
 - If both are missing or empty for a wishlist, that wishlist will never send mail.
 
+### Email rendering
+
+```bash
+EMAIL_THEME="dark"  # "dark" or "light" email template theme
+```
+
+Invalid values fall back to `dark`.
+
 ### Polling and mode
 
 ```bash
-POLL_MINUTES="30"      # global default polling interval
+POLL_MINUTES="10"      # global default polling interval
 MODE="daemon"          # "daemon" or "once"
 ```
 
@@ -191,21 +199,46 @@ MODE="daemon"          # "daemon" or "once"
     - `poll_minutes` from config.json if present and valid (>=1)
     - Otherwise, the global `POLL_MINUTES`
 - In `once` mode, all wishlists are processed one time and the program exits.
+- Default poll interval is 10 minutes if `POLL_MINUTES` is unset.
+
+### Price change notifications
+
+```bash
+PRICE_NOTIFY_THRESHOLD="20"   # percent change needed before price alerts are sent
+```
+
+If either the previous or current price is unknown, changes are always included.
 
 ### Amazon-specific tuning
 
 ```bash
-AMAZON_MIN_SPACING="45"   # minimum seconds between any two Amazon wishlist fetches
-AMAZON_MAX_PAGES="50"     # maximum number of Amazon wishlist pages to process
-PAGE_SLEEP="5"            # delay after each fetched page
-CAPTCHA_SLEEP="600"       # delay when CAPTCHA is encountered
-FAIL_SLEEP="30"
-AMAZON_MAX_PAGE_RETRIES="3"     # number of retries per page before aborting           # delay after non-200 Amazon responses
+AMAZON_MIN_SPACING="45"        # minimum seconds between any two Amazon wishlist fetches
+AMAZON_MAX_PAGES="50"          # maximum number of Amazon wishlist pages to process
+AMAZON_MAX_PAGE_RETRIES="3"    # number of retries per page before aborting
+PAGE_SLEEP="5"                 # delay after each fetched page (seconds)
+FAIL_SLEEP="30"                # delay after non-200 responses (seconds)
+CAPTCHA_SLEEP="900"            # backoff when CAPTCHA is encountered (seconds)
 ```
 
 - `AMAZON_MIN_SPACING` spaces out Amazon wishlist fetches globally to reduce CAPTCHA and rate limiting issues.
 - `AMAZON_MAX_PAGES` caps how many Amazon wishlist pages are crawled, preventing infinite pagination loops.
 - `PAGE_SLEEP`, `CAPTCHA_SLEEP`, and `FAIL_SLEEP` control per-page delays, CAPTCHA backoff, and error backoff respectively.
+
+### Throne fetcher
+
+```bash
+THRONE_USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+THRONE_PROXY_URL=""              # optional HTTP(S) proxy for Throne requests
+THRONE_DEBUG_LOG_SAMPLES="true"  # log a few parsed items when debug logging is enabled
+```
+
+### Debug output
+
+```bash
+DEBUG_DIR="/data/debug_dumps"    # shared directory for HTML debug dumps (Amazon & Throne)
+```
+
+- When `LOG_LEVEL=DEBUG`, both Amazon and Throne dump the raw fetched HTML into `DEBUG_DIR`.
 
 ### Paths and logging
 
@@ -216,9 +249,11 @@ LOG_FILE="/data/wishlist_monitor.log"
 LOG_LEVEL="INFO"
 LOG_TO_FILE="true"
 LOG_TO_STDOUT="true"
+LOG_MAX_BYTES="2097152"   # rotate logs after ~2MB
+LOG_BACKUPS="3"           # number of rotated log files to keep
 ```
 
-The SQLite database and log file should be on a persistent volume (such as `/data`).
+The SQLite database and log file should be on a persistent volume (such as `/data`). Log rotation is controlled by `LOG_MAX_BYTES` and `LOG_BACKUPS`.
 
 ---
 
@@ -372,17 +407,6 @@ Tracks all changes:
 - `price_change`
 
 With fields for before/after prices and timestamps.
-
----
-
-## Notes and Future Ideas
-
-Some potential extensions:
-
-- Per-wishlist flags like `notify_price_increases` and `notify_price_decreases`
-- Discord or Slack webhooks
-- Exporting events as CSV or JSON
-- More advanced filters (only notify if price drops more than X%)
 
 ---
 

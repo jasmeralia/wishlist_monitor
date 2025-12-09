@@ -234,7 +234,7 @@ def extract_items_from_soup(soup: BeautifulSoup) -> list[Item]:
     return items
 
 
-def _apply_global_spacing(wishlist_name: str | None, identifier: str) -> None:
+def _apply_global_spacing(wishlist_name: str | None, identifier: str, page: int) -> None:
     """Apply global Amazon fetch spacing based on AMAZON_MIN_SPACING."""
     global _last_amazon_fetch_ts
     now = time.time()
@@ -242,7 +242,7 @@ def _apply_global_spacing(wishlist_name: str | None, identifier: str) -> None:
     if since_last < AMAZON_MIN_SPACING:
         wait_for = AMAZON_MIN_SPACING - since_last
         logger.info(
-            "Amazon fetch spacing: last request %.1fs ago; waiting %.1fs before fetching '%s'.",
+            "Amazon fetch spacing: last request %.1fs ago; waiting %.1fs before fetching '%s' (page %d).",
             since_last,
             wait_for,
             wishlist_name or identifier,
@@ -286,7 +286,7 @@ def fetch_items(identifier: str, wishlist_name: str | None = None) -> list[Item]
     page = 0
 
     while next_url is not None and page < AMAZON_MAX_PAGES:
-        _apply_global_spacing(wishlist_name, identifier)
+        _apply_global_spacing(wishlist_name, identifier, page)
 
         current_url = next_url
         attempt = 0

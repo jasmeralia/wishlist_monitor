@@ -113,7 +113,7 @@ def process_wishlist(wl: Dict[str, Any]) -> None:
         logger.info("No changes for %s '%s' (%s).", platform, name, wishlist_id)
         return
 
-    subject = f"[{platform.capitalize()}] Changes detected for {name}"
+    subject = f"[Wishlist Monitor] Changes detected on {platform.capitalize()} for {name}"
     html_body = build_html_report(
         platform, name, wishlist_id, added, removed, price_changes, previous_count, new_count
     )

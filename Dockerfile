@@ -16,6 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY core ./core
 COPY fetchers ./fetchers
+COPY templates ./templates
 COPY monitor.py ./
 
 # config.json and /data directory will be mounted from host

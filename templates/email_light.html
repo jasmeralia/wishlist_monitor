@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>{{ title }}</title>
+  <style>
+    body {
+      background: {{ colors.page_bg }};
+      color: {{ colors.text_primary }};
+      font-family: system-ui, sans-serif;
+      margin:0; padding:0;
+    }
+    .container {
+      max-width:800px;
+      margin:auto;
+      padding:16px;
+    }
+    .card {
+      background: {{ colors.card_bg }};
+      border: 1px solid {{ colors.card_border }};
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+    .section-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-top: 20px;
+    }
+    a { color: {{ colors.link_color }}; text-decoration:none; }
+  </style>
+</head>
+<body>
+<div class="container">
+
+<h2>Wishlist update – {{ platform|capitalize }}</h2>
+<div>{{ summary_html|safe }}</div>
+
+{% if added %}
+  <div class="section-title">🟢 Added</div>
+  {% for item in added %}
+    <div class="card">
+      <div><strong>{{ item.name }}</strong></div>
+      <div>{{ item.price_str }}</div>
+      {% if item.image_url %}
+        <img src="{{ item.image_url }}" width="64" height="64" style="object-fit:cover;border-radius:6px;"/>
+      {% endif %}
+      {% if item.product_url %}
+        <div><a href="{{ item.product_url }}">View item</a></div>
+      {% endif %}
+    </div>
+  {% endfor %}
+{% endif %}
+
+{% if removed %}
+  <div class="section-title">🔴 Removed</div>
+  {% for item in removed %}
+    <div class="card">
+      <div><strong>{{ item.name }}</strong></div>
+      <div style="color:{{ colors.price_increase }}">Removed</div>
+    </div>
+  {% endfor %}
+{% endif %}
+
+{% if price_changes %}
+  <div class="section-title">🟡 Price Changes</div>
+  {% for c in price_changes %}
+    <div class="card">
+      <div><strong>{{ c.item.name }}</strong></div>
+      <div>{{ c.before_str }} → {{ c.after_str }} {% if c.pct_str %}<span style="color:{{ c.color }}">{{ c.pct_str }}</span>{% endif %}</div>
+      {% if c.item.image_url %}
+        <img src="{{ c.item.image_url }}" width="64" height="64" style="object-fit:cover;border-radius:6px;"/>
+      {% endif %}
+      {% if c.item.product_url %}
+        <div><a href="{{ c.item.product_url }}">View item</a></div>
+      {% endif %}
+    </div>
+  {% endfor %}
+{% endif %}
+
+<div style="margin-top:20px;font-size:11px;color:{{ colors.text_muted }};text-align:center;">
+  This email was sent by
+  <a href="https://github.com/jasmeralia/wishlist_monitor">Watchlist Monitor</a>
+  © 2025
+  <a href="https://x.com/jasmeralia">Morgan Blackthorne</a>
+  <a href="https://x.com/jasmeralia"><img src="https://abs.twimg.com/responsive-web/client-web/icon-ios.b1fc7275.png" width="14"/></a>
+  <a href="https://discord.gg/Seyngsh5MF"><img src="https://cdn.simpleicons.org/discord/{{ colors.text_primary.lstrip('#') }}" width="14"/></a>
+</div>
+
+</div>
+</body>
+</html>

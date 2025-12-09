@@ -4,5 +4,7 @@ pytz
 tenacity
 types-pytz
 types-requests
+Jinja2
+types-Jinja2
 ruff
 mypy
